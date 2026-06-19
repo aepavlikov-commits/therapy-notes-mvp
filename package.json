@@ -1,0 +1,11 @@
+{
+  "name": "gigachat-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "undici": "^7.0.0",
+    "@neondatabase/serverless": "^1.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "bcryptjs": "^2.4.3"
+  }
+}
