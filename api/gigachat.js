@@ -14,19 +14,21 @@
 // https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt
 // (переименовать в .pem и положить в /api/russian_trusted_root_ca.pem).
 
-import https from "node:https";
+import { Agent } from "undici";
 import fs from "node:fs";
 import path from "node:path";
 
-let httpsAgent;
+let dispatcher;
 try {
   const certPath = path.join(process.cwd(), "api", "russian_trusted_root_ca.pem");
   const ca = fs.readFileSync(certPath);
-  httpsAgent = new https.Agent({ ca });
+  dispatcher = new Agent({
+    connect: { ca },
+  });
 } catch (e) {
   // Сертификат не найден — запросы к GigaChat будут падать с ошибкой SSL,
   // пока файл не будет добавлен в проект (см. инструкцию в README).
-  httpsAgent = undefined;
+  dispatcher = undefined;
 }
 
 export default async function handler(req, res) {
@@ -52,11 +54,11 @@ export default async function handler(req, res) {
   if (!prompt) {
     return res.status(400).json({ error: "Не передан prompt в теле запроса" });
   }
-  if (!httpsAgent) {
+  if (!dispatcher) {
     return res.status(500).json({
       error: "Сертификат НУЦ Минцифры не найден на сервере",
       details:
-        "Скачайте сертификат с https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt, переименуйте в russian_trusted_root_ca.pem и положите в папку /api проекта, затем переразверните сайт.",
+        "Убедитесь, что файл russian_trusted_root_ca.pem лежит в папке /api проекта (рядом с gigachat.js), затем переразверните сайт.",
     });
   }
 
@@ -75,7 +77,7 @@ export default async function handler(req, res) {
         Authorization: `Basic ${authKey}`,
       },
       body: "scope=GIGACHAT_API_PERS",
-      agent: httpsAgent,
+      dispatcher,
     });
 
     if (!oauthResponse.ok) {
@@ -102,7 +104,7 @@ export default async function handler(req, res) {
         messages: [{ role: "user", content: prompt }],
         temperature: 0.5,
       }),
-      agent: httpsAgent,
+      dispatcher,
     });
 
     if (!chatResponse.ok) {
@@ -121,3 +123,4 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Внутренняя ошибка прокси", details: err.message });
   }
 }
+
