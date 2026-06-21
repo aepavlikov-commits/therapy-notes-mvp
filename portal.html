@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Личный кабинет</title>
+<style>
+  :root {
+    --teal: #0f6e64;
+    --teal-dark: #0b5249;
+    --teal-light: #e6f3f1;
+    --stone-50: #fafaf9;
+    --stone-200: #e7e5e4;
+    --stone-300: #d6d3d1;
+    --stone-500: #78716c;
+    --stone-600: #57534e;
+    --stone-800: #292524;
+    --stone-900: #1c1917;
+    --amber: #92400e;
+    --amber-light: #fffbeb;
+    --amber-border: #fde68a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--stone-50);
+    color: var(--stone-900);
+  }
+  .container { max-width: 640px; margin: 0 auto; padding: 32px 20px; }
+  .header { text-align: center; margin-bottom: 28px; }
+  .logo { width: 48px; height: 48px; border-radius: 12px; background: var(--teal); display: flex; align-items: center; justify-content: center; color: white; font-size: 22px; margin: 0 auto 12px; }
+  h1 { font-size: 19px; margin: 0; }
+  .sub { font-size: 13px; color: var(--stone-500); margin-top: 4px; }
+
+  .card { background: white; border: 1px solid var(--stone-200); border-radius: 12px; padding: 22px; margin-bottom: 16px; }
+  .consent-text { white-space: pre-wrap; font-size: 13px; line-height: 1.6; color: var(--stone-600); max-height: 360px; overflow-y: auto; border: 1px solid var(--stone-200); border-radius: 8px; padding: 14px; background: var(--stone-50); margin-bottom: 18px; }
+
+  label { font-size: 13px; font-weight: 500; display: block; margin-bottom: 6px; }
+  input[type="text"] { width: 100%; font-size: 14px; border: 1px solid var(--stone-200); border-radius: 10px; padding: 11px 12px; margin-bottom: 14px; }
+  .checkbox-row { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 18px; }
+  .checkbox-row input { margin-top: 3px; }
+  .checkbox-row label { font-size: 13px; font-weight: 400; margin: 0; }
+
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-size: 14px; font-weight: 500; padding: 12px 18px; border-radius: 10px; border: none; cursor: pointer; width: 100%; }
+  .btn-primary { background: var(--teal); color: white; }
+  .btn-primary:disabled { opacity: 0.5; cursor: default; }
+
+  .notice { display: flex; gap: 10px; font-size: 13px; padding: 12px 14px; border-radius: 10px; align-items: flex-start; background: var(--amber-light); border: 1px solid var(--amber-border); color: var(--amber); margin-bottom: 14px; }
+
+  .session-item { border: 1px solid var(--stone-200); border-radius: 10px; padding: 16px; margin-bottom: 12px; background: white; }
+  .session-date { font-size: 13px; font-weight: 600; color: var(--stone-800); margin-bottom: 8px; }
+  .session-note { white-space: pre-wrap; font-size: 14px; line-height: 1.6; color: var(--stone-700); }
+
+  .empty-state { text-align: center; padding: 40px 20px; color: var(--stone-500); font-size: 13px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <div class="header">
+    <div class="logo">📝</div>
+    <h1 id="pageTitle">Личный кабинет</h1>
+    <p class="sub" id="pageSub">Загрузка...</p>
+  </div>
+
+  <div id="content"></div>
+</div>
+
+<script>
+const params = new URLSearchParams(window.location.search);
+const token = params.get('token');
+
+async function load() {
+  if (!token) {
+    document.getElementById('content').innerHTML = '<div class="card"><p class="empty-state">Ссылка некорректна. Проверьте, что вы перешли по полной ссылке от своего терапевта.</p></div>';
+    return;
+  }
+
+  try {
+    const response = await fetch('/api/portal/' + token);
+    const data = await response.json();
+
+    if (!response.ok) {
+      document.getElementById('content').innerHTML = '<div class="card"><p class="empty-state">' + data.error + '</p></div>';
+      return;
+    }
+
+    document.getElementById('pageSub').textContent = data.clientName ? 'Здравствуйте, ' + data.clientName : '';
+
+    if (!data.consentSigned) {
+      renderConsent(data.consentText);
+    } else {
+      renderSessions(data.sessions);
+    }
+  } catch (err) {
+    document.getElementById('content').innerHTML = '<div class="card"><p class="empty-state">Не удалось загрузить данные. Попробуйте обновить страницу.</p></div>';
+  }
+}
+
+function renderConsent(consentText) {
+  document.getElementById('pageTitle').textContent = 'Согласие на обработку данных';
+  document.getElementById('content').innerHTML = `
+    <div class="card">
+      <p style="font-size:13px;color:var(--stone-600);margin-bottom:14px;">Прежде чем начать работу, пожалуйста, ознакомьтесь с условиями обработки ваших данных и подпишите согласие.</p>
+      <div class="consent-text">${escapeHtml(consentText)}</div>
+      <label>Ваше ФИО</label>
+      <input type="text" id="signedName" placeholder="Иванова Анна Сергеевна" />
+      <div class="checkbox-row">
+        <input type="checkbox" id="agreeCheck" />
+        <label for="agreeCheck">Я прочитал(а) и согласен(на) с условиями обработки персональных данных, изложенными выше</label>
+      </div>
+      <div id="consentError" class="notice hidden"></div>
+      <button class="btn btn-primary" id="signBtn" onclick="signConsent()">Подписать согласие</button>
+    </div>
+  `;
+}
+
+async function signConsent() {
+  const signedName = document.getElementById('signedName').value.trim();
+  const agreed = document.getElementById('agreeCheck').checked;
+  const errorEl = document.getElementById('consentError');
+  errorEl.classList.add('hidden');
+
+  if (!signedName) {
+    errorEl.textContent = 'Пожалуйста, укажите ваше ФИО.';
+    errorEl.classList.remove('hidden');
+    return;
+  }
+  if (!agreed) {
+    errorEl.textContent = 'Пожалуйста, подтвердите согласие, отметив чекбокс.';
+    errorEl.classList.remove('hidden');
+    return;
+  }
+
+  const btn = document.getElementById('signBtn');
+  btn.disabled = true;
+  btn.textContent = 'Подписываем...';
+
+  try {
+    const response = await fetch('/api/portal/sign-consent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, signedName })
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error);
+    load();
+  } catch (err) {
+    errorEl.textContent = err.message;
+    errorEl.classList.remove('hidden');
+    btn.disabled = false;
+    btn.textContent = 'Подписать согласие';
+  }
+}
+
+function renderSessions(sessions) {
+  document.getElementById('pageTitle').textContent = 'Ваши консультации';
+  const content = document.getElementById('content');
+  if (!sessions || sessions.length === 0) {
+    content.innerHTML = '<div class="card"><p class="empty-state">Пока нет завершённых консультаций. Памятка появится здесь после первой сессии.</p></div>';
+    return;
+  }
+  content.innerHTML = sessions.map(s => `
+    <div class="session-item">
+      <div class="session-date">${formatDate(s.session_date)}</div>
+      <div class="session-note">${escapeHtml(s.client_note || '')}</div>
+    </div>
+  `).join('');
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function formatDate(iso) {
+  const d = new Date(iso);
+  return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' });
+}
+
+load();
+</script>
+</body>
+</html>
