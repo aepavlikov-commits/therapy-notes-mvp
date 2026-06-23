@@ -790,16 +790,6 @@ function stopRecording() {
     audioContext = null;
   }
 
-  // ВРЕМЕННО: скачиваем записанный файл локально, чтобы можно было
-  // прослушать его и проверить качество звука перед отправкой на
-  // распознавание. Удалить этот блок после диагностики.
-  const downloadLink = document.createElement('a');
-  downloadLink.href = URL.createObjectURL(wavBlob);
-  downloadLink.download = 'test-recording-' + Date.now() + '.wav';
-  document.body.appendChild(downloadLink);
-  downloadLink.click();
-  document.body.removeChild(downloadLink);
-
   handleRecordingFinished(wavBlob, durationSeconds);
 }
 
