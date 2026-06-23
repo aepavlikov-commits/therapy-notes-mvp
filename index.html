@@ -632,6 +632,11 @@ function resetSessionForm() {
 }
 
 function loadSample() {
+  const existingText = document.getElementById('transcriptInput').value.trim();
+  if (existingText) {
+    const confirmed = window.confirm('В поле уже есть текст (например, ваша запись). Вставить пример вместо него? Текущий текст будет удалён.');
+    if (!confirmed) return;
+  }
   document.getElementById('transcriptInput').value = SAMPLE_TRANSCRIPT;
 }
 
