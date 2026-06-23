@@ -4,29 +4,37 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Заметки сессии</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Hanken+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   :root {
-    --teal: #0f6e64;
-    --teal-dark: #0b5249;
-    --teal-light: #e6f3f1;
-    --stone-50: #fafaf9;
-    --stone-100: #f5f5f4;
-    --stone-200: #e7e5e4;
-    --stone-300: #d6d3d1;
-    --stone-500: #78716c;
-    --stone-600: #57534e;
-    --stone-800: #292524;
-    --stone-900: #1c1917;
-    --red: #dc2626;
-    --red-light: #fef2f2;
+    --teal: #C2683E;
+    --teal-dark: #9a5a32;
+    --teal-light: #FBEFE3;
+    --stone-50: #F7F4EF;
+    --stone-100: #F1EBE1;
+    --stone-200: #ECE5DA;
+    --stone-300: #D8CDB6;
+    --stone-500: #9b948a;
+    --stone-600: #7d756a;
+    --stone-700: #6b6459;
+    --stone-800: #2A2723;
+    --stone-900: #1F1B16;
+    --red: #b3492f;
+    --red-light: #fbeae5;
     --amber: #92400e;
     --amber-light: #fffbeb;
     --amber-border: #fde68a;
+    --sidebar-bg: #26433A;
+    --sidebar-text: #cfe0d6;
+    --sidebar-text-dim: #a9c2b5;
+    --accent-warm: #E9A06B;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     background: var(--stone-50);
     color: var(--stone-900);
   }
@@ -48,29 +56,29 @@
   }
   .header-left { display: flex; align-items: center; gap: 12px; cursor: pointer; }
   .logo {
-    width: 32px; height: 32px; border-radius: 8px; background: var(--teal);
+    width: 32px; height: 32px; border-radius: 9px; background: var(--teal);
     display: flex; align-items: center; justify-content: center; color: white; font-size: 15px; flex-shrink: 0;
   }
-  .header h1 { font-size: 15px; font-weight: 600; margin: 0; line-height: 1.2; }
+  .header h1 { font-size: 15px; font-weight: 700; margin: 0; line-height: 1.2; }
   .header p { font-size: 12px; color: var(--stone-500); margin: 2px 0 0; line-height: 1.2; }
   .header-nav { display: flex; gap: 8px; align-items: center; }
 
   .container { max-width: 760px; margin: 0 auto; padding: 32px 24px; display: flex; flex-direction: column; gap: 24px; }
   .container-narrow { max-width: 420px; margin: 60px auto; padding: 0 24px; display: flex; flex-direction: column; gap: 20px; }
 
-  .card { background: white; border: 1px solid var(--stone-200); border-radius: 12px; padding: 20px; }
+  .card { background: white; border: 1px solid var(--stone-200); border-radius: 16px; padding: 22px; box-shadow: 0 1px 2px rgba(0,0,0,.03); }
   .card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
   .step-tag { font-size: 12px; font-weight: 600; color: var(--teal-dark); background: var(--teal-light); padding: 2px 8px; border-radius: 6px; margin-right: 8px; }
   .card-title { font-size: 14px; font-weight: 600; display: inline-flex; align-items: center; }
   .card-sub { font-size: 12px; color: var(--stone-500); margin: 4px 0 14px; }
   .link-btn { font-size: 12px; color: var(--teal-dark); background: none; border: none; cursor: pointer; text-decoration: underline; padding: 0; }
 
-  .btn { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 500; padding: 11px 18px; border-radius: 10px; border: none; cursor: pointer; transition: background .15s; }
-  .btn-primary { background: var(--teal); color: white; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; padding: 12px 20px; border-radius: 12px; border: none; cursor: pointer; transition: background .15s; }
+  .btn-primary { background: var(--teal); color: white; box-shadow: 0 4px 12px rgba(194,104,62,.25); }
   .btn-primary:hover { background: var(--teal-dark); }
   .btn-danger { background: var(--red); color: white; }
   .btn-dark { background: var(--stone-900); color: white; width: 100%; justify-content: center; padding: 13px; font-size: 14px; }
-  .btn-dark:hover { background: #000; }
+  .btn-dark:hover { background: #14110d; }
   .btn-dark:disabled { opacity: .6; cursor: default; }
   .btn-ghost { font-size: 12px; padding: 7px 12px; border-radius: 8px; border: 1px solid var(--stone-300); background: white; color: var(--stone-600); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
   .btn-ghost:hover { background: var(--stone-100); }
@@ -95,7 +103,7 @@
   .results-card { background: white; border: 1px solid var(--stone-200); border-radius: 12px; overflow: hidden; }
   .results-body { padding: 20px; }
   .note-text { white-space: pre-wrap; line-height: 1.65; font-size: 14.5px; color: var(--stone-800); }
-  .risk-block { border-left: 4px solid var(--red); background: var(--red-light); border-radius: 0 8px 8px 0; padding: 12px 16px; margin-bottom: 16px; font-weight: 500; color: #991b1b; white-space: pre-wrap; line-height: 1.65; }
+  .risk-block { border-left: 4px solid var(--red); background: var(--red-light); border-radius: 0 8px 8px 0; padding: 12px 16px; margin-bottom: 16px; font-weight: 500; color: #7a2e1c; white-space: pre-wrap; line-height: 1.65; }
 
   .hidden { display: none !important; }
   .spinner { width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.4); border-top-color: white; border-radius: 50%; animation: spin .7s linear infinite; display: inline-block; }
@@ -116,25 +124,74 @@
   .session-preview { font-size: 13px; color: var(--stone-600); margin-top: 6px; line-height: 1.5; }
 
   .empty-state { text-align: center; padding: 40px 20px; color: var(--stone-500); font-size: 13px; }
+
+  /* Боковая панель навигации (направление "Soft Clinical") */
+  .app-layout { display: flex; min-height: 100vh; }
+  .sidebar {
+    flex: none; width: 248px; background: var(--sidebar-bg); color: var(--sidebar-text);
+    padding: 26px 20px; display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh;
+  }
+  .sidebar-brand { display: flex; align-items: center; gap: 11px; padding: 0 8px 28px; cursor: pointer; }
+  .sidebar-brand .logo { width: 32px; height: 32px; border-radius: 9px; background: var(--accent-warm); color: var(--sidebar-bg); }
+  .sidebar-brand-text { font-size: 16px; font-weight: 600; color: #fff; line-height: 1.25; }
+  .sidebar-brand-sub { font-size: 12px; color: var(--sidebar-text-dim); margin-top: 2px; }
+  .sidebar-nav { display: flex; flex-direction: column; gap: 4px; }
+  .sidebar-link {
+    display: flex; align-items: center; gap: 11px; padding: 11px 14px; border-radius: 10px;
+    font-size: 14px; color: var(--sidebar-text-dim); cursor: pointer; background: none; border: none;
+    width: 100%; text-align: left; font-family: inherit;
+  }
+  .sidebar-link:hover { background: rgba(255,255,255,.06); color: #fff; }
+  .sidebar-link.active { background: rgba(233,160,107,.16); color: #fff; font-weight: 600; }
+  .sidebar-link .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-warm); flex-shrink: 0; visibility: hidden; }
+  .sidebar-link.active .dot { visibility: visible; }
+  .sidebar-footer {
+    margin-top: auto; display: flex; align-items: center; gap: 11px; padding: 12px 8px;
+    border-top: 1px solid rgba(255,255,255,.1);
+  }
+  .sidebar-footer-avatar {
+    width: 34px; height: 34px; border-radius: 50%; background: var(--accent-warm);
+    display: flex; align-items: center; justify-content: center; color: var(--sidebar-bg);
+    font-weight: 700; font-size: 14px; flex-shrink: 0;
+  }
+  .sidebar-footer-name { font-size: 13px; font-weight: 600; color: #fff; }
+  .sidebar-footer-role { font-size: 12px; color: var(--sidebar-text-dim); cursor: pointer; }
+  .app-main { flex: 1; min-width: 0; }
+  @media (max-width: 760px) {
+    .app-layout { flex-direction: column; }
+    .sidebar { width: 100%; height: auto; position: static; flex-direction: row; align-items: center; padding: 14px 16px; gap: 16px; overflow-x: auto; }
+    .sidebar-brand { padding: 0; flex-shrink: 0; }
+    .sidebar-nav { flex-direction: row; flex-shrink: 0; }
+    .sidebar-footer { margin-top: 0; margin-left: auto; border-top: none; flex-shrink: 0; }
+  }
 </style>
 </head>
 <body>
 
-<div id="header" class="header hidden">
-  <div class="header-inner">
-    <div class="header-left" onclick="navigate('clients')">
-      <div class="logo">📝</div>
-      <div>
-        <h1>Заметки сессии</h1>
-        <p id="headerSubtitle">Картотека клиентов</p>
-      </div>
+<div class="app-layout">
+<div id="header" class="sidebar hidden">
+  <div class="sidebar-brand" onclick="navigate('clients')">
+    <div class="logo">📝</div>
+    <div>
+      <div class="sidebar-brand-text">Заметки сессии</div>
+      <div class="sidebar-brand-sub" id="headerSubtitle">Картотека клиентов</div>
     </div>
-    <div class="header-nav">
-      <button class="btn-ghost" onclick="navigate('settings')">⚙ Настройки</button>
-      <button class="btn-ghost" onclick="logout()">Выйти</button>
+  </div>
+  <div class="sidebar-nav">
+    <button class="sidebar-link active" data-section="clients" onclick="navigate('clients')"><span class="dot"></span>Клиенты</button>
+    <button class="sidebar-link" data-section="settings" onclick="navigate('settings')"><span class="dot"></span>Настройки</button>
+    <button class="sidebar-link" onclick="logout()"><span class="dot"></span>Выйти</button>
+  </div>
+  <div class="sidebar-footer">
+    <div class="sidebar-footer-avatar">Т</div>
+    <div>
+      <div class="sidebar-footer-name">Терапевт</div>
+      <div class="sidebar-footer-role" onclick="logout()">Выйти</div>
     </div>
   </div>
 </div>
+
+<div class="app-main">
 
 <div id="screen-auth" class="container-narrow hidden">
   <div style="text-align:center;">
@@ -387,6 +444,8 @@
   <div id="settingsSaved" class="notice notice-info hidden">Настройки сохранены ✓</div>
 </div>
 
+</div>
+</div>
 
 <script>
 let token = localStorage.getItem('therapyapp_token') || null;
@@ -454,6 +513,17 @@ async function api(path, options) {
 function navigate(screen) {
   document.querySelectorAll('[id^="screen-"]').forEach(function(el) { el.classList.add('hidden'); });
   document.getElementById('header').classList.toggle('hidden', screen === 'auth');
+
+  // Подсветка активного пункта боковой панели: "Настройки" активны только
+  // на экране настроек, всё остальное (клиенты, карточка клиента, сессии)
+  // относится к разделу "Клиенты".
+  var sidebarLinks = document.querySelectorAll('.sidebar-link');
+  var activeSection = screen === 'settings' ? 'settings' : 'clients';
+  sidebarLinks.forEach(function(link) {
+    if (link.dataset && link.dataset.section) {
+      link.classList.toggle('active', link.dataset.section === activeSection);
+    }
+  });
 
   if (screen === 'auth') {
     document.getElementById('screen-auth').classList.remove('hidden');
