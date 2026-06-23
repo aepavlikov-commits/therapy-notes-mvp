@@ -34,6 +34,20 @@
 //
 //   GET   /api/sessions/recognize?action=status&operationId=...
 //     → { done, transcript? , error? }
+//
+//   --- Временная диагностика CORS бакета (без авторизации терапевта) ---
+//   Используется один раз, чтобы настроить ExposeHeaders: ["ETag"] на
+//   бакете Yandex Object Storage — без этого браузер не может прочитать
+//   ETag части multipart upload, и загрузка чанков молча проваливается.
+//   Защищён отдельным секретом (переменная SETUP_CORS_SECRET на Vercel),
+//   не основной системой авторизации — чтобы быть доступным даже без
+//   логина терапевта, но не быть открытым для всех.
+//   После того как настройка подтверждена, этот блок можно удалить.
+//
+//   GET   /api/sessions/recognize?action=setup-cors&secret=...
+//     → текущая CORS-конфигурация бакета
+//   GET   /api/sessions/recognize?action=setup-cors&secret=...&apply=1
+//     → применяет правильную конфигурацию, затем возвращает её
 
 import { sql } from "../../lib/db.mjs";
 import { getTherapistIdFromRequest } from "../../lib/auth.mjs";
@@ -45,10 +59,57 @@ import {
   completeMultipartUpload,
   abortMultipartUpload,
   finalizeWavHeader,
+  setBucketCors,
+  getBucketCorsConfig,
 } from "../../lib/yandex-storage.mjs";
 import { startRecognition, checkRecognitionStatus } from "../../lib/yandex-speechkit.mjs";
 
+const SETUP_CORS_ALLOWED_ORIGIN = "https://therapy-notes-mvp.vercel.app";
+
 export default async function handler(req, res) {
+  // Действие setup-cors обрабатывается ДО проверки авторизации терапевта —
+  // у него своя отдельная защита через секрет (см. комментарий выше), так
+  // как нужно открыть его как обычный URL в браузере, без логина.
+  if (req.method === "GET" && req.query && req.query.action === "setup-cors") {
+    const expectedSecret = process.env.SETUP_CORS_SECRET;
+
+    if (!expectedSecret) {
+      return res.status(403).json({
+        error:
+          "SETUP_CORS_SECRET не задан в переменных окружения — действие отключено по умолчанию из соображений безопасности.",
+      });
+    }
+
+    const providedSecret = req.query.secret;
+    if (!providedSecret || providedSecret !== expectedSecret) {
+      return res.status(403).json({ error: "Неверный или отсутствующий параметр secret." });
+    }
+
+    try {
+      if (req.query.apply === "1") {
+        await setBucketCors([SETUP_CORS_ALLOWED_ORIGIN]);
+        const updatedConfig = await getBucketCorsConfig();
+        return res.status(200).json({
+          message: "CORS-конфигурация применена.",
+          config: updatedConfig,
+        });
+      }
+
+      const currentConfig = await getBucketCorsConfig();
+      return res.status(200).json({
+        message:
+          currentConfig.length === 0
+            ? "У бакета сейчас нет CORS-конфигурации вообще."
+            : "Текущая CORS-конфигурация бакета:",
+        config: currentConfig,
+        hint: "Чтобы применить правильную конфигурацию, добавьте к URL параметр &apply=1",
+      });
+    } catch (err) {
+      console.error("recognize (setup-cors): ошибка:", err);
+      return res.status(500).json({ error: err.message || "Неизвестная ошибка." });
+    }
+  }
+
   const therapistId = getTherapistIdFromRequest(req);
   if (!therapistId) {
     return res.status(401).json({ error: "Не авторизован" });
@@ -251,4 +312,3 @@ export default async function handler(req, res) {
   res.setHeader("Allow", "GET, POST");
   return res.status(405).json({ error: "Метод не поддерживается" });
 }
-
