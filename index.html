@@ -238,6 +238,12 @@
     <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
       <button id="recordBtn" class="btn btn-primary" onclick="toggleRecording()">🎙️ Начать запись</button>
       <span id="recIndicator" class="hidden" style="font-size:12px;color:var(--red);">● Идёт запись · <span id="recTimer">0:00</span></span>
+      <span id="uploadIndicator" class="hidden" style="font-size:12px;color:var(--teal-dark);">☁ Сохранено: <span id="uploadedSeconds">0:00</span></span>
+    </div>
+    <div id="resumeNotice" class="notice notice-amber hidden" style="margin-top:12px;">
+      Обнаружена незавершённая запись с прошлого раза (страница была закрыта во время записи).
+      <button class="link-btn" style="margin-left:8px;" onclick="resumeUnfinishedUpload()">Попробовать восстановить и отправить</button>
+      <button class="link-btn" style="margin-left:8px;" onclick="discardUnfinishedUpload()">Удалить и не восстанавливать</button>
     </div>
     <div id="recognitionStatus" class="notice notice-info hidden" style="margin-top:12px;">
       <span class="spinner" style="border-top-color:var(--teal-dark); border-color:rgba(15,110,100,.25);"></span>
@@ -383,12 +389,29 @@ let audioContext = null;
 let scriptProcessorNode = null;
 let mediaStreamSource = null;
 let mediaStream = null;
-let recordedSamples = [];
 let recordingSampleRate = 48000;
 let isRecording = false;
 let recTimerInterval = null;
 let recSeconds = 0;
 let recognitionPollInterval = null;
+
+// --- Состояние потоковой (chunked) загрузки записи ---
+// Вместо накопления ВСЕЙ записи в одном массиве в памяти (что на часовой
+// записи съедает гигабайты и приводит к убийству таба на мобильном Safari),
+// аудио режется на чанки по CHUNK_SECONDS секунд. Каждый готовый чанк
+// сразу кодируется в PCM и отправляется на сервер как очередная часть
+// S3 multipart upload, после чего сразу выбрасывается из памяти браузера.
+const CHUNK_SECONDS = 90; // запас выше минимума S3 multipart part (5MB): 90 сек при 48kHz/16бит/моно ≈ 8.2MB, при 44.1kHz ≈ 7.6MB
+let pendingSamples = [];      // сэмплы текущего, ещё не отправленного чанка
+let pendingSamplesSeconds = 0;
+let currentUploadId = null;
+let currentObjectKey = null;
+let currentClientIdForUpload = null;
+let nextPartNumber = 1;
+let uploadedParts = [];       // [{ partNumber, eTag }] — нужны в правильном порядке для complete-upload
+let isFirstChunk = true;      // первый чанк должен включать WAV-заголовок, остальные — только сырые PCM-данные
+let uploadedSecondsTotal = 0;
+let chunkUploadQueue = Promise.resolve(); // гарантирует, что части уходят на сервер по очереди, в правильном порядке
 
 const ESTIMATED_RECOGNITION_RATIO = 0.25;
 const POLL_INTERVAL_MS = 7000;
@@ -722,21 +745,191 @@ function renderClinicalNoteInto(container, text) {
   container.appendChild(afterDiv);
 }
 
+// ===========================================================================
+// IndexedDB-буфер для записи сессии
+// ===========================================================================
+// Назначение: подстраховка на случай, если страница закроется/перезагрузится
+// (случайно человеком, или из-за нехватки памяти) ПОСЛЕ того, как chunk был
+// отправлен на сервер, но ДО того, как мы успели обновить состояние, либо
+// если сама отправка чанка не удалась (пропала сеть). При следующем запуске
+// сайта на этом же устройстве мы можем найти незавершённую загрузку и
+// предложить её восстановить — отправить оставшиеся чанки и дозавершить
+// multipart upload, не потеряв всю запись.
+//
+// Важно: здесь хранятся МЕТАДАННЫЕ загрузки (uploadId, objectKey, список уже
+// подтверждённых серверов частей с их ETag) — не сами аудиоданные. Хранить
+// гигабайты аудио в IndexedDB избыточно, раз чанки и так уже улетают на
+// сервер почти сразу после записи; буфер нужен именно для того, чтобы не
+// потерять "путеводную нить" (uploadId/objectKey/parts), без которой
+// сервер не даст завершить (complete-upload) уже загруженные части.
+const IDB_NAME = 'therapyapp_recording';
+const IDB_STORE = 'sessions';
+
+function idbOpen() {
+  return new Promise(function(resolve, reject) {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = function() {
+      req.result.createObjectStore(IDB_STORE, { keyPath: 'id' });
+    };
+    req.onsuccess = function() { resolve(req.result); };
+    req.onerror = function() { reject(req.error); };
+  });
+}
+
+async function idbSaveUploadState(state) {
+  try {
+    const db = await idbOpen();
+    await new Promise(function(resolve, reject) {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).put(Object.assign({ id: 'current' }, state));
+      tx.oncomplete = resolve;
+      tx.onerror = function() { reject(tx.error); };
+    });
+    db.close();
+  } catch (err) {
+    // Не критично — IndexedDB недоступен в редких случаях (приватный режим
+    // некоторых браузеров и т.п.). Основная отправка на сервер всё равно работает.
+    console.warn('idbSaveUploadState: не удалось сохранить состояние локально:', err);
+  }
+}
+
+async function idbLoadUploadState() {
+  try {
+    const db = await idbOpen();
+    const result = await new Promise(function(resolve, reject) {
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const req = tx.objectStore(IDB_STORE).get('current');
+      req.onsuccess = function() { resolve(req.result || null); };
+      req.onerror = function() { reject(req.error); };
+    });
+    db.close();
+    return result;
+  } catch (err) {
+    console.warn('idbLoadUploadState: не удалось прочитать состояние:', err);
+    return null;
+  }
+}
+
+async function idbClearUploadState() {
+  try {
+    const db = await idbOpen();
+    await new Promise(function(resolve, reject) {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).delete('current');
+      tx.oncomplete = resolve;
+      tx.onerror = function() { reject(tx.error); };
+    });
+    db.close();
+  } catch (err) {
+    console.warn('idbClearUploadState: не удалось очистить состояние:', err);
+  }
+}
+
+// При загрузке страницы проверяем, не осталась ли с прошлого раза
+// незавершённая запись (страница закрылась во время записи сессии).
+async function checkForUnfinishedUpload() {
+  const saved = await idbLoadUploadState();
+  if (saved && saved.uploadId && saved.objectKey && saved.parts && saved.parts.length > 0) {
+    document.getElementById('resumeNotice').classList.remove('hidden');
+  }
+}
+
+async function resumeUnfinishedUpload() {
+  const saved = await idbLoadUploadState();
+  if (!saved) {
+    document.getElementById('resumeNotice').classList.add('hidden');
+    return;
+  }
+  try {
+    // Завершаем multipart upload тем, что уже успело загрузиться на сервер.
+    // Последний незавершённый чанк (если он не успел уйти) будет потерян —
+    // это ожидаемо и неизбежно: его уже нет ни на сервере, ни в браузере.
+    await api('/api/sessions/recognize', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'complete-upload', objectKey: saved.objectKey, uploadId: saved.uploadId, parts: saved.parts })
+    });
+    await idbClearUploadState();
+    document.getElementById('resumeNotice').classList.add('hidden');
+    alert('Восстановленная запись сохранена и отправлена на распознавание. Откройте карточку клиента «' + (saved.clientName || '') + '», чтобы проверить результат через пару минут.');
+  } catch (err) {
+    alert('Не удалось восстановить запись: ' + err.message + '. Попробуйте позже — данные пока не удалены.');
+  }
+}
+
+async function discardUnfinishedUpload() {
+  const saved = await idbLoadUploadState();
+  if (saved && saved.uploadId && saved.objectKey) {
+    try {
+      await api('/api/sessions/recognize', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'abort-upload', objectKey: saved.objectKey, uploadId: saved.uploadId })
+      });
+    } catch (err) {
+      // Не критично — неотменённая multipart-загрузка просто останется в бакете
+      console.warn('discardUnfinishedUpload: не удалось отменить upload на сервере:', err);
+    }
+  }
+  await idbClearUploadState();
+  document.getElementById('resumeNotice').classList.add('hidden');
+}
+
+// Предупреждение при попытке закрыть/обновить страницу во время записи —
+// защищает от случайного нажатия "обновить" самим пользователем.
+// От принудительного убийства таба системой (OOM на мобильном Safari) это
+// не защищает — там браузер не даёt шанса показать диалог — но именно
+// для такого случая у нас есть чанкованная загрузка и IndexedDB-буфер выше.
+window.addEventListener('beforeunload', function(event) {
+  if (isRecording) {
+    event.preventDefault();
+    event.returnValue = '';
+    return '';
+  }
+});
+
 function toggleRecording() {
   if (!isRecording) startRecording(); else stopRecording();
 }
 
+
+
 function startRecording() {
   document.getElementById('micWarning').classList.add('hidden');
+  document.getElementById('resumeNotice').classList.add('hidden');
+
   navigator.mediaDevices.getUserMedia({
     audio: {
       autoGainControl: true,
       echoCancellation: true,
       noiseSuppression: true
     }
-  }).then(function(stream) {
+  }).then(async function(stream) {
+    // Открываем multipart upload ДО начала накопления звука — если это
+    // не получится (например, нет сети), запись не начинается вообще,
+    // и пользователь сразу видит ошибку, а не теряет время на запись,
+    // которую потом не получится отправить.
+    let uploadInfo;
+    try {
+      uploadInfo = await api('/api/sessions/recognize', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'start-upload', clientId: currentClientId })
+      });
+    } catch (err) {
+      stream.getTracks().forEach(function(track) { track.stop(); });
+      showSessionError('Не удалось подготовить загрузку записи: ' + err.message);
+      return;
+    }
+
     mediaStream = stream;
-    recordedSamples = [];
+    pendingSamples = [];
+    pendingSamplesSeconds = 0;
+    currentUploadId = uploadInfo.uploadId;
+    currentObjectKey = uploadInfo.objectKey;
+    currentClientIdForUpload = currentClientId;
+    nextPartNumber = 1;
+    uploadedParts = [];
+    isFirstChunk = true;
+    uploadedSecondsTotal = 0;
+    chunkUploadQueue = Promise.resolve();
 
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     audioContext = new AudioContextClass();
@@ -749,7 +942,16 @@ function startRecording() {
 
     scriptProcessorNode.onaudioprocess = function(event) {
       const channelData = event.inputBuffer.getChannelData(0);
-      recordedSamples.push(new Float32Array(channelData));
+      pendingSamples.push(new Float32Array(channelData));
+      pendingSamplesSeconds += channelData.length / recordingSampleRate;
+
+      // Как только накопили достаточно секунд — отправляем чанк на сервер
+      // и сразу освобождаем память. Запись продолжает накапливать новые
+      // сэмплы в pendingSamples независимо от того, успела ли отправка
+      // предыдущего чанка завершиться (см. chunkUploadQueue ниже).
+      if (pendingSamplesSeconds >= CHUNK_SECONDS) {
+        flushPendingChunk(false);
+      }
     };
 
     mediaStreamSource.connect(scriptProcessorNode);
@@ -759,12 +961,85 @@ function startRecording() {
     recSeconds = 0;
     document.getElementById('recordBtn').textContent = "⏹ Остановить запись";
     document.getElementById('recIndicator').classList.remove('hidden');
+    document.getElementById('uploadIndicator').classList.remove('hidden');
+    document.getElementById('uploadedSeconds').textContent = '0:00';
     recTimerInterval = setInterval(function() {
       recSeconds++;
       document.getElementById('recTimer').textContent = Math.floor(recSeconds/60) + ':' + String(recSeconds%60).padStart(2,'0');
     }, 1000);
   }).catch(function() {
     document.getElementById('micWarning').classList.remove('hidden');
+  });
+}
+
+// Забирает накопленные на текущий момент сэмплы, кодирует их в PCM-байты
+// (первый чанк — с WAV-заголовком, остальные — чистые данные) и кладёт
+// отправку в chunkUploadQueue, которая гарантирует, что части уходят на
+// сервер строго по очереди (важно для multipart upload — порядок частей
+// должен соответствовать порядку аудио). isFinal=true вызывается из
+// stopRecording() для последнего, неполного чанка.
+function flushPendingChunk(isFinal) {
+  if (pendingSamples.length === 0) {
+    if (isFinal) chunkUploadQueue = chunkUploadQueue.then(finishUpload);
+    return;
+  }
+
+  const samplesToSend = pendingSamples;
+  const sampleRateAtCapture = recordingSampleRate;
+  const includeHeader = isFirstChunk;
+  isFirstChunk = false;
+  pendingSamples = [];
+  pendingSamplesSeconds = 0;
+
+  const partNumber = nextPartNumber++;
+  const blob = encodeChunk(samplesToSend, sampleRateAtCapture, includeHeader);
+
+  chunkUploadQueue = chunkUploadQueue.then(function() {
+    return uploadChunkPart(blob, partNumber);
+  }).catch(function(err) {
+    // Не прерываем запись из-за одной неудавшейся части — пользователь
+    // продолжает говорить, а ошибку покажем при попытке завершить запись.
+    // Часть просто не попадёт в uploadedParts, и complete-upload это заметит.
+    console.error('flushPendingChunk: не удалось загрузить часть ' + partNumber + ':', err);
+  });
+
+  if (isFinal) {
+    chunkUploadQueue = chunkUploadQueue.then(finishUpload);
+  }
+}
+
+async function uploadChunkPart(blob, partNumber) {
+  const partInfo = await api('/api/sessions/recognize', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'get-part-url', objectKey: currentObjectKey, uploadId: currentUploadId, partNumber: partNumber })
+  });
+
+  const putResponse = await fetch(partInfo.partUrl, { method: 'PUT', body: blob });
+  if (!putResponse.ok) {
+    throw new Error('Не удалось загрузить часть записи №' + partNumber);
+  }
+  const eTag = putResponse.headers.get('ETag') || putResponse.headers.get('etag');
+  if (!eTag) {
+    throw new Error('Не удалось получить ETag части №' + partNumber + '. Вероятная причина: в CORS-настройках бакета Yandex Object Storage не указан ExposeHeaders: ["ETag"] — без этого браузер не может прочитать заголовок ETag из ответа, даже если сама загрузка прошла успешно.');
+  }
+
+  uploadedParts.push({ partNumber: partNumber, eTag: eTag });
+  uploadedSecondsTotal += CHUNK_SECONDS; // приблизительно, для индикатора — точная цифра не критична
+  const indicator = document.getElementById('uploadedSeconds');
+  if (indicator) {
+    const shown = Math.min(uploadedSecondsTotal, recSeconds);
+    indicator.textContent = Math.floor(shown/60) + ':' + String(Math.floor(shown%60)).padStart(2,'0');
+  }
+
+  // Сохраняем прогресс в IndexedDB при каждой успешно загруженной части —
+  // это и есть подстраховка от случайной/неожиданной перезагрузки страницы.
+  await idbSaveUploadState({
+    uploadId: currentUploadId,
+    objectKey: currentObjectKey,
+    clientId: currentClientIdForUpload,
+    clientName: currentClientName,
+    sampleRate: recordingSampleRate,
+    parts: uploadedParts.slice()
   });
 }
 
@@ -786,22 +1061,68 @@ function stopRecording() {
     mediaStream.getTracks().forEach(function(track) { track.stop(); });
     mediaStream = null;
   }
-
-  const wavBlob = encodeWavFromSamples(recordedSamples, recordingSampleRate);
-  const durationSeconds = recSeconds;
-
   if (audioContext) {
     audioContext.close();
     audioContext = null;
   }
 
-  handleRecordingFinished(wavBlob, durationSeconds);
+  const durationSeconds = recSeconds;
+
+  const recordBtn = document.getElementById('recordBtn');
+  const statusBox = document.getElementById('recognitionStatus');
+  const statusText = document.getElementById('recognitionStatusText');
+  recordBtn.disabled = true;
+  statusBox.classList.remove('hidden');
+  statusText.textContent = 'Догружаем последнюю часть записи...';
+
+  // Отправляем последний (возможно неполный) чанк и запускаем завершение
+  // multipart upload + распознавание. Всё это уже стоит в очереди
+  // chunkUploadQueue, поэтому порядок частей гарантированно сохраняется.
+  flushPendingChunk(true);
+
+  chunkUploadQueue
+    .then(function() {
+      statusText.textContent = 'Запускаем распознавание речи...';
+      return api('/api/sessions/recognize', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'start-recognition', objectKey: currentObjectKey, sampleRateHertz: recordingSampleRate })
+      });
+    })
+    .then(function(startData) {
+      idbClearUploadState();
+      const estimatedSeconds = Math.max(15, Math.round(durationSeconds * ESTIMATED_RECOGNITION_RATIO));
+      pollRecognitionStatus(startData.operationId, estimatedSeconds);
+    })
+    .catch(function(err) {
+      statusBox.classList.add('hidden');
+      recordBtn.disabled = false;
+      showSessionError(err.message || 'Не удалось обработать запись.');
+      // Состояние в IndexedDB намеренно НЕ очищаем здесь — если что-то
+      // пошло не так на этапе завершения, у пользователя останется
+      // возможность восстановить уже загруженные части при следующем
+      // открытии страницы (см. checkForUnfinishedUpload).
+    });
 }
 
-// Склеивает накопленные Float32Array-буферы и кодирует их в стандартный
-// 16-битный одноканальный WAV-файл (формат LINEAR16_PCM), который
-// Yandex SpeechKit принимает без проверки заголовка контейнера.
-function encodeWavFromSamples(samplesArray, sampleRate) {
+// Завершает multipart upload на сервере после того, как все части
+// (включая последнюю) точно загружены.
+function finishUpload() {
+  if (uploadedParts.length === 0) {
+    return Promise.reject(new Error('Запись получилась пустой — ни одна часть не была загружена.'));
+  }
+  return api('/api/sessions/recognize', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'complete-upload', objectKey: currentObjectKey, uploadId: currentUploadId, parts: uploadedParts, sampleRateHertz: recordingSampleRate })
+  });
+}
+
+// Кодирует один чанк сэмплов в Blob с сырыми PCM16-данными. Если
+// includeHeader=true (только для самого первого чанка записи), в начало
+// добавляется стандартный 44-байтный WAV-заголовок — на момент записи
+// итоговый размер файла ещё не известен, поэтому в заголовке указывается
+// заведомо неточный размер; сервер перезапишет его на правильный после
+// того, как вся запись будет загружена (см. finalizeWavHeader на сервере).
+function encodeChunk(samplesArray, sampleRate, includeHeader) {
   let totalLength = 0;
   for (let i = 0; i < samplesArray.length; i++) totalLength += samplesArray[i].length;
 
@@ -812,19 +1133,23 @@ function encodeWavFromSamples(samplesArray, sampleRate) {
     offset += samplesArray[i].length;
   }
 
-  // Нормализация громкости: усиливаем сигнал так, чтобы пиковая амплитуда
-  // достигала ~90% от максимума. Без этого записи через getUserMedia часто
-  // получаются слишком тихими (особенно на MacBook), что заметно ухудшает
-  // точность распознавания речи, хотя на слух запись звучит нормально —
-  // человеческое ухо легко компенсирует тихий звук, а модели распознавания
-  // речи гораздо чувствительнее к низкому уровню сигнала.
+  // Нормализация громкости в пределах ЭТОГО чанка: усиливаем сигнал так,
+  // чтобы пиковая амплитуда достигала ~90% от максимума. Без этого записи
+  // через getUserMedia часто получаются слишком тихими (особенно на
+  // MacBook), что заметно ухудшает точность распознавания речи.
+  // ВАЖНО: раньше нормализация считалась по ВСЕЙ записи целиком (один общий
+  // пик на час разговора). Теперь она считается отдельно для каждого
+  // ~90-секундного чанка. Для разговорной речи это не должно ухудшить
+  // качество — пиковая громкость голоса не успевает сильно "уехать" за
+  // 90 секунд, — но если в будущем заметите, что отдельные куски записи
+  // звучат тише/громче других сильнее, чем раньше, дело в этом месте.
   let peak = 0;
   for (let i = 0; i < merged.length; i++) {
     const abs = Math.abs(merged[i]);
     if (abs > peak) peak = abs;
   }
   const targetPeak = 0.9;
-  const gain = peak > 0 ? Math.min(targetPeak / peak, 10) : 1; // ограничиваем максимальное усиление 10x, чтобы не усиливать шум в полной тишине
+  const gain = peak > 0 ? Math.min(targetPeak / peak, 10) : 1;
 
   const pcm16 = new Int16Array(merged.length);
   for (let i = 0; i < merged.length; i++) {
@@ -832,17 +1157,23 @@ function encodeWavFromSamples(samplesArray, sampleRate) {
     pcm16[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
   }
 
+  if (!includeHeader) {
+    return new Blob([pcm16.buffer], { type: 'application/octet-stream' });
+  }
+
   const blockAlign = 2; // 16 бит, 1 канал
   const byteRate = sampleRate * blockAlign;
   const dataSize = pcm16.length * 2;
-  const buffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(buffer);
+  const headerBuffer = new ArrayBuffer(44);
+  const view = new DataView(headerBuffer);
 
   function writeString(offset, str) {
     for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
   }
 
   writeString(0, 'RIFF');
+  // Размер пока неизвестен (это только первый чанк) — сервер перезапишет
+  // это значение на правильное после полной загрузки записи.
   view.setUint32(4, 36 + dataSize, true);
   writeString(8, 'WAVE');
   writeString(12, 'fmt ');
@@ -856,52 +1187,7 @@ function encodeWavFromSamples(samplesArray, sampleRate) {
   writeString(36, 'data');
   view.setUint32(40, dataSize, true);
 
-  let writeOffset = 44;
-  for (let i = 0; i < pcm16.length; i++, writeOffset += 2) {
-    view.setInt16(writeOffset, pcm16[i], true);
-  }
-
-  return new Blob([buffer], { type: 'audio/wav' });
-}
-
-async function handleRecordingFinished(audioBlob, durationSeconds) {
-  const recordBtn = document.getElementById('recordBtn');
-  const statusBox = document.getElementById('recognitionStatus');
-  const statusText = document.getElementById('recognitionStatusText');
-
-  recordBtn.disabled = true;
-  statusBox.classList.remove('hidden');
-  statusText.textContent = 'Загружаем запись...';
-
-  try {
-    const uploadInfo = await api('/api/sessions/recognize', {
-      method: 'POST',
-      body: JSON.stringify({ action: 'get-upload-url', clientId: currentClientId })
-    });
-
-    statusText.textContent = 'Загружаем запись...';
-    const uploadResponse = await fetch(uploadInfo.uploadUrl, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'audio/wav' },
-      body: audioBlob
-    });
-    if (!uploadResponse.ok) {
-      throw new Error('Не удалось загрузить аудиофайл в хранилище.');
-    }
-
-    statusText.textContent = 'Запускаем распознавание речи...';
-    const startData = await api('/api/sessions/recognize', {
-      method: 'POST',
-      body: JSON.stringify({ action: 'start-recognition', objectKey: uploadInfo.objectKey, sampleRateHertz: recordingSampleRate })
-    });
-
-    const estimatedSeconds = Math.max(15, Math.round(durationSeconds * ESTIMATED_RECOGNITION_RATIO));
-    pollRecognitionStatus(startData.operationId, estimatedSeconds);
-  } catch (err) {
-    statusBox.classList.add('hidden');
-    recordBtn.disabled = false;
-    showSessionError(err.message || 'Не удалось обработать запись.');
-  }
+  return new Blob([headerBuffer, pcm16.buffer], { type: 'audio/wav' });
 }
 
 function pollRecognitionStatus(operationId, estimatedSeconds) {
@@ -935,6 +1221,7 @@ function pollRecognitionStatus(operationId, estimatedSeconds) {
       clearInterval(recognitionPollInterval);
       recordBtn.disabled = false;
       statusBox.classList.add('hidden');
+      document.getElementById('uploadIndicator').classList.add('hidden');
 
       if (data.error) {
         showSessionError('Распознавание не удалось: ' + data.error);
@@ -952,6 +1239,7 @@ function pollRecognitionStatus(operationId, estimatedSeconds) {
       clearInterval(recognitionPollInterval);
       recordBtn.disabled = false;
       statusBox.classList.add('hidden');
+      document.getElementById('uploadIndicator').classList.add('hidden');
       showSessionError(err.message || 'Не удалось проверить статус распознавания.');
     }
   }, POLL_INTERVAL_MS);
@@ -1020,6 +1308,12 @@ if (token) {
 } else {
   navigate('auth');
 }
+
+// Проверяем, не осталась ли с прошлого раза незавершённая запись (страница
+// закрылась/перезагрузилась во время записи сессии) — если да, на экране
+// записи появится предложение восстановить и отправить её.
+checkForUnfinishedUpload();
+
 </script>
 </body>
 </html>
