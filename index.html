@@ -723,7 +723,13 @@ function toggleRecording() {
 
 function startRecording() {
   document.getElementById('micWarning').classList.add('hidden');
-  navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
+  navigator.mediaDevices.getUserMedia({
+    audio: {
+      autoGainControl: true,
+      echoCancellation: true,
+      noiseSuppression: true
+    }
+  }).then(function(stream) {
     mediaStream = stream;
     recordedSamples = [];
 
@@ -811,9 +817,23 @@ function encodeWavFromSamples(samplesArray, sampleRate) {
     offset += samplesArray[i].length;
   }
 
+  // Нормализация громкости: усиливаем сигнал так, чтобы пиковая амплитуда
+  // достигала ~90% от максимума. Без этого записи через getUserMedia часто
+  // получаются слишком тихими (особенно на MacBook), что заметно ухудшает
+  // точность распознавания речи, хотя на слух запись звучит нормально —
+  // человеческое ухо легко компенсирует тихий звук, а модели распознавания
+  // речи гораздо чувствительнее к низкому уровню сигнала.
+  let peak = 0;
+  for (let i = 0; i < merged.length; i++) {
+    const abs = Math.abs(merged[i]);
+    if (abs > peak) peak = abs;
+  }
+  const targetPeak = 0.9;
+  const gain = peak > 0 ? Math.min(targetPeak / peak, 10) : 1; // ограничиваем максимальное усиление 10x, чтобы не усиливать шум в полной тишине
+
   const pcm16 = new Int16Array(merged.length);
   for (let i = 0; i < merged.length; i++) {
-    const sample = Math.max(-1, Math.min(1, merged[i]));
+    const sample = Math.max(-1, Math.min(1, merged[i] * gain));
     pcm16[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
   }
 
@@ -1008,4 +1028,3 @@ if (token) {
 </script>
 </body>
 </html>
-
