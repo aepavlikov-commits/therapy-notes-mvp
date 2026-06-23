@@ -245,11 +245,19 @@
       <button class="link-btn" style="margin-left:8px;" onclick="resumeUnfinishedUpload()">Попробовать восстановить и отправить</button>
       <button class="link-btn" style="margin-left:8px;" onclick="discardUnfinishedUpload()">Удалить и не восстанавливать</button>
     </div>
+    <div id="chunkErrorNotice" class="notice notice-amber hidden" style="margin-top:12px;">
+      <strong>⚠ Не удаётся сохранить запись на сервер.</strong>
+      <div id="chunkErrorText" style="margin-top:4px; font-size:13px;"></div>
+      <button class="link-btn" style="margin-top:6px;" onclick="stopRecording()">Остановить запись сейчас</button>
+    </div>
     <div id="recognitionStatus" class="notice notice-info hidden" style="margin-top:12px;">
       <span class="spinner" style="border-top-color:var(--teal-dark); border-color:rgba(15,110,100,.25);"></span>
       <span id="recognitionStatusText">Идёт распознавание речи...</span>
     </div>
     <div id="micWarning" class="notice notice-amber hidden" style="margin-top:12px;">Не удалось получить доступ к микрофону. Проверьте разрешения браузера.</div>
+    <div id="wakeLockWarning" class="notice notice-amber hidden" style="margin-top:12px;">
+      ⚠ Не удалось заблокировать автовыключение экрана. На этом устройстве/браузере во время записи держите, пожалуйста, экран телефона включённым и не блокируйте его (не нажимайте кнопку питания) — иначе запись может прерваться и часть разговора потеряется.
+    </div>
     <button id="swapSpeakersBtn" class="link-btn hidden" style="margin-top:10px;" onclick="swapSpeakerRoles()">⇄ Терапевт и клиент перепутаны местами? Поменять</button>
   </div>
 
@@ -412,6 +420,9 @@ let uploadedParts = [];       // [{ partNumber, eTag }] — нужны в пра
 let isFirstChunk = true;      // первый чанк должен включать WAV-заголовок, остальные — только сырые PCM-данные
 let uploadedSecondsTotal = 0;
 let chunkUploadQueue = Promise.resolve(); // гарантирует, что части уходят на сервер по очереди, в правильном порядке
+let consecutiveChunkFailures = 0;
+let wakeLockSentinel = null;
+let lastSuccessfulChunkAt = null;
 
 const ESTIMATED_RECOGNITION_RATIO = 0.25;
 const POLL_INTERVAL_MS = 7000;
@@ -892,9 +903,64 @@ function toggleRecording() {
 
 
 
+// ---------------------------------------------------------------------------
+// Screen Wake Lock — не даёт экрану телефона выключиться/заблокироваться
+// во время записи сессии.
+//
+// Зачем это нужно: на iOS Safari (и на многих Android-браузерах) при
+// блокировке экрана/уходе устройства в спящий режим JS-выполнение страницы
+// СИЛЬНО замедляется или полностью замораживается — включая обработку звука
+// через ScriptProcessorNode/AudioContext. Из-за этого запись могла идти
+// почти без накопления и отправки данных всё то время, пока экран был
+// заблокирован, даже если индикатор записи на экране выглядел активным.
+//
+// Wake Lock API не спасает от закрытия вкладки/перехода в другое приложение
+// (там lock снимается автоматически) — но именно блокировку экрана
+// (нажатие кнопки питания, автовыключение по таймауту) он предотвращает,
+// и поддерживается в Safari начиная с iOS 16.4 (в обычной вкладке браузера,
+// не для PWA, добавленных на главный экран).
+// ---------------------------------------------------------------------------
+
+async function requestWakeLock() {
+  document.getElementById('wakeLockWarning').classList.add('hidden');
+  if (!('wakeLock' in navigator)) {
+    document.getElementById('wakeLockWarning').classList.remove('hidden');
+    return;
+  }
+  try {
+    wakeLockSentinel = await navigator.wakeLock.request('screen');
+    wakeLockSentinel.addEventListener('release', function() {
+      wakeLockSentinel = null;
+    });
+  } catch (err) {
+    // Бывает по разным причинам (низкий заряд батареи, режим энергосбережения
+    // и т.п.) — не блокируем запись, но явно предупреждаем пользователя.
+    console.warn('requestWakeLock: не удалось получить wake lock:', err);
+    document.getElementById('wakeLockWarning').classList.remove('hidden');
+  }
+}
+
+function releaseWakeLock() {
+  if (wakeLockSentinel) {
+    wakeLockSentinel.release().catch(function() {});
+    wakeLockSentinel = null;
+  }
+}
+
+// Если экран всё же временно гас и снова включился во время записи (либо
+// вкладка ненадолго уходила в фон), пытаемся перезапросить wake lock —
+// браузер снимает его автоматически при сворачивании.
+document.addEventListener('visibilitychange', function() {
+  if (isRecording && document.visibilityState === 'visible' && !wakeLockSentinel) {
+    requestWakeLock();
+  }
+});
+
 function startRecording() {
   document.getElementById('micWarning').classList.add('hidden');
   document.getElementById('resumeNotice').classList.add('hidden');
+  document.getElementById('chunkErrorNotice').classList.add('hidden');
+  consecutiveChunkFailures = 0;
 
   navigator.mediaDevices.getUserMedia({
     audio: {
@@ -931,6 +997,8 @@ function startRecording() {
     uploadedSecondsTotal = 0;
     chunkUploadQueue = Promise.resolve();
 
+    await requestWakeLock();
+
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     audioContext = new AudioContextClass();
     recordingSampleRate = audioContext.sampleRate;
@@ -959,6 +1027,7 @@ function startRecording() {
 
     isRecording = true;
     recSeconds = 0;
+    lastSuccessfulChunkAt = Date.now();
     document.getElementById('recordBtn').textContent = "⏹ Остановить запись";
     document.getElementById('recIndicator').classList.remove('hidden');
     document.getElementById('uploadIndicator').classList.remove('hidden');
@@ -966,6 +1035,21 @@ function startRecording() {
     recTimerInterval = setInterval(function() {
       recSeconds++;
       document.getElementById('recTimer').textContent = Math.floor(recSeconds/60) + ':' + String(recSeconds%60).padStart(2,'0');
+
+      // Watchdog: если прошло заметно больше времени, чем длительность
+      // одного чанка, а ни одной части так и не загрузилось — скорее всего
+      // страница была заморожена (например, экран заблокировался, а wake
+      // lock не сработал) и звук всё это время фактически не записывался.
+      // Это не остановит запись автоматически (человек может всё ещё
+      // успешно говорить, просто отправка временно подвисла из-за сети),
+      // но явно предупредит, а не оставит индикатор молча стоять на 0:00.
+      const secondsSinceLastChunk = (Date.now() - lastSuccessfulChunkAt) / 1000;
+      if (secondsSinceLastChunk > CHUNK_SECONDS * 2) {
+        const errBox = document.getElementById('chunkErrorNotice');
+        const errText = document.getElementById('chunkErrorText');
+        errText.textContent = 'Уже ' + Math.round(secondsSinceLastChunk) + ' секунд ни одна часть записи не подтвердилась как сохранённая. Возможно, экран телефона блокировался, и запись звука приостанавливалась. Проверьте, что экран не заблокирован, или остановите запись сейчас, чтобы не потерять больше.';
+        errBox.classList.remove('hidden');
+      }
     }, 1000);
   }).catch(function() {
     document.getElementById('micWarning').classList.remove('hidden');
@@ -996,11 +1080,22 @@ function flushPendingChunk(isFinal) {
 
   chunkUploadQueue = chunkUploadQueue.then(function() {
     return uploadChunkPart(blob, partNumber);
+  }).then(function() {
+    consecutiveChunkFailures = 0;
+    lastSuccessfulChunkAt = Date.now();
+    document.getElementById('chunkErrorNotice').classList.add('hidden');
   }).catch(function(err) {
     // Не прерываем запись из-за одной неудавшейся части — пользователь
-    // продолжает говорить, а ошибку покажем при попытке завершить запись.
+    // может говорить дальше, а ошибку показываем прямо на экране (а не
+    // только в консоли — на телефоне у человека обычно нет доступа к ней).
     // Часть просто не попадёт в uploadedParts, и complete-upload это заметит.
     console.error('flushPendingChunk: не удалось загрузить часть ' + partNumber + ':', err);
+    consecutiveChunkFailures++;
+    const errBox = document.getElementById('chunkErrorNotice');
+    const errText = document.getElementById('chunkErrorText');
+    errText.textContent = (err && err.message ? err.message : 'Неизвестная ошибка') +
+      (consecutiveChunkFailures > 1 ? ' (подряд не удалось загрузить ' + consecutiveChunkFailures + ' части — продолжать запись бессмысленно, нажмите «Остановить запись сейчас»)' : '');
+    errBox.classList.remove('hidden');
   });
 
   if (isFinal) {
@@ -1048,6 +1143,8 @@ function stopRecording() {
   clearInterval(recTimerInterval);
   document.getElementById('recordBtn').textContent = "🎙️ Начать запись";
   document.getElementById('recIndicator').classList.add('hidden');
+  document.getElementById('chunkErrorNotice').classList.add('hidden');
+  releaseWakeLock();
 
   if (scriptProcessorNode) {
     scriptProcessorNode.disconnect();
